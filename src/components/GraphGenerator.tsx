@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
+import { toPng } from 'html-to-image';
 import {
   BarChart,
   Bar,
@@ -36,7 +37,8 @@ import {
   GitBranch, 
   Clock, 
   HelpCircle,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Download
 } from 'lucide-react';
 
 interface Props {
@@ -163,6 +165,7 @@ const PURPOSE_MAP: Record<GraphPurpose, { types: string[]; icon: any; usedFor: s
 };
 
 export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
+  const chartRef = useRef<HTMLDivElement>(null);
   const columns = useMemo(() => (data.length > 0 ? Object.keys(data[0]) : []), [data]);
   
   const [selectedUsedFor, setSelectedUsedFor] = useState<string>('');
@@ -222,25 +225,54 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
     return data;
   }, [data, config.xAxis, config.yAxis, config.type]);
 
+  const handleDownload = async () => {
+    if (chartRef.current === null) return;
+    
+    try {
+      const dataUrl = await toPng(chartRef.current, { backgroundColor: '#ffffff', cacheBust: true });
+      const link = document.createElement('a');
+      link.download = `audit-chart-${config.type.toLowerCase().replace(/\s+/g, '-')}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (err) {
+      console.error('Failed to download chart', err);
+    }
+  };
+
   const renderChart = () => {
     if (data.length === 0) return null;
 
     // Prepare Sankey data if needed
     if (config.type === 'Sankey Diagram') {
-      const sankeyData = {
-        nodes: Array.from(new Set([...data.map(d => d[config.xAxis]), ...data.map(d => d[config.yAxis])])).map(name => ({ name })),
-        links: data.map(d => ({
-          source: Array.from(new Set([...data.map(d => d[config.xAxis]), ...data.map(d => d[config.yAxis])])).indexOf(d[config.xAxis]),
-          target: Array.from(new Set([...data.map(d => d[config.xAxis]), ...data.map(d => d[config.yAxis])])).indexOf(d[config.yAxis]),
-          value: Number(d.value || d.amount || 1)
-        }))
-      };
+      const nodesSet = new Set<string>();
+      data.forEach(d => {
+        if (d[config.xAxis]) nodesSet.add(String(d[config.xAxis]));
+        if (d[config.yAxis]) nodesSet.add(String(d[config.yAxis]));
+      });
+      const nodes = Array.from(nodesSet).map(name => ({ name }));
+      const nodeIndexMap = new Map(nodes.map((n, i) => [n.name, i]));
+
+      const links = data.map(d => ({
+        source: nodeIndexMap.get(String(d[config.xAxis])) ?? 0,
+        target: nodeIndexMap.get(String(d[config.yAxis])) ?? 0,
+        value: Number(d.value || d.amount || 1)
+      })).filter(l => l.source !== l.target);
+
+      if (nodes.length === 0 || links.length === 0) {
+        return (
+          <div className="h-[400px] flex items-center justify-center text-slate-400 border-2 border-dashed border-slate-100 rounded-xl">
+            <p>Insufficient flow data for Sankey Diagram</p>
+          </div>
+        );
+      }
+
       return (
         <ResponsiveContainer width="100%" height={400}>
           <Sankey
-            data={sankeyData}
+            data={{ nodes, links }}
             node={{ stroke: '#10b981', strokeWidth: 2 }}
-            link={{ stroke: '#e5e7eb' }}
+            link={{ stroke: '#e5e7eb', fill: '#10b981', fillOpacity: 0.1 }}
+            margin={{ top: 20, bottom: 20, left: 20, right: 20 }}
           >
             <Tooltip />
           </Sankey>
@@ -248,11 +280,17 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
       );
     }
 
+    const commonProps = {
+      width: "100%" as const,
+      height: 400 as const,
+      data: config.type.includes('Pie') || config.type.includes('Donut') || config.type.includes('Radar') || config.type.includes('Stacked') ? aggregatedData : data
+    };
+
     switch (config.type) {
       case 'Line Chart':
         return (
-          <ResponsiveContainer width="100%" height={400}>
-            <LineChart data={data}>
+          <ResponsiveContainer width={commonProps.width} height={commonProps.height}>
+            <LineChart data={commonProps.data}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey={config.xAxis} />
               <YAxis />
@@ -264,8 +302,8 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
         );
       case 'Area Chart':
         return (
-          <ResponsiveContainer width="100%" height={400}>
-            <AreaChart data={data}>
+          <ResponsiveContainer width={commonProps.width} height={commonProps.height}>
+            <AreaChart data={commonProps.data}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey={config.xAxis} />
               <YAxis />
@@ -278,9 +316,9 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
       case 'Bar Chart':
       case 'Sorted Bar Chart':
       case 'Histogram':
-        const sortedData = config.type === 'Sorted Bar Chart' ? [...aggregatedData].sort((a, b) => b[config.yAxis] - a[config.yAxis]) : aggregatedData;
+        const sortedData = config.type === 'Sorted Bar Chart' ? [...aggregatedData].sort((a, b) => b[config.yAxis] - a[config.yAxis]) : commonProps.data;
         return (
-          <ResponsiveContainer width="100%" height={400}>
+          <ResponsiveContainer width={commonProps.width} height={commonProps.height}>
             <BarChart data={sortedData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey={config.xAxis} />
@@ -293,8 +331,8 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
         );
       case 'Stacked Bar':
         return (
-          <ResponsiveContainer width="100%" height={400}>
-            <BarChart data={aggregatedData}>
+          <ResponsiveContainer width={commonProps.width} height={commonProps.height}>
+            <BarChart data={commonProps.data}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey={config.xAxis} />
               <YAxis />
@@ -307,10 +345,10 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
       case 'Pie Chart':
       case 'Donut Chart':
         return (
-          <ResponsiveContainer width="100%" height={400}>
+          <ResponsiveContainer width={commonProps.width} height={commonProps.height}>
             <PieChart>
               <Pie
-                data={aggregatedData}
+                data={commonProps.data}
                 dataKey={config.yAxis}
                 nameKey={config.xAxis}
                 cx="50%"
@@ -319,7 +357,7 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
                 outerRadius={150}
                 label
               >
-                {aggregatedData.map((_, index) => (
+                {commonProps.data.map((_, index) => (
                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                 ))}
               </Pie>
@@ -330,21 +368,21 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
         );
       case 'Scatter Plot':
         return (
-          <ResponsiveContainer width="100%" height={400}>
+          <ResponsiveContainer width={commonProps.width} height={commonProps.height}>
             <ScatterChart>
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey={config.xAxis} name={config.xAxis} />
               <YAxis dataKey={config.yAxis} name={config.yAxis} />
               <Tooltip cursor={{ strokeDasharray: '3 3' }} />
               <Legend />
-              <Scatter name="Data Points" data={data} fill="#8b5cf6" />
+              <Scatter name="Data Points" data={commonProps.data} fill="#8b5cf6" />
             </ScatterChart>
           </ResponsiveContainer>
         );
       case 'Radar Chart':
         return (
-          <ResponsiveContainer width="100%" height={400}>
-            <RadarChart cx="50%" cy="50%" outerRadius="80%" data={aggregatedData}>
+          <ResponsiveContainer width={commonProps.width} height={commonProps.height}>
+            <RadarChart cx="50%" cy="50%" outerRadius="80%" data={commonProps.data}>
               <PolarGrid />
               <PolarAngleAxis dataKey={config.xAxis} />
               <PolarRadiusAxis />
@@ -469,17 +507,26 @@ export const GraphGenerator: React.FC<Props> = ({ data, category }) => {
         </div>
       </div>
 
-      <div className="p-8">
+      <div className="p-8" ref={chartRef}>
         {config.xAxis && config.yAxis ? (
           <div className="animate-in fade-in duration-500">
-            <div className="mb-6 flex items-center gap-3">
-              <div className="p-2 bg-emerald-50 rounded-lg">
-                <currentPurpose.icon className="w-5 h-5 text-emerald-600" />
+            <div className="mb-6 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-emerald-50 rounded-lg">
+                  <currentPurpose.icon className="w-5 h-5 text-emerald-600" />
+                </div>
+                <div>
+                  <h4 className="font-medium text-slate-900">{config.type} Analysis</h4>
+                  <p className="text-xs text-slate-500">{config.xAxis} vs {config.yAxis}</p>
+                </div>
               </div>
-              <div>
-                <h4 className="font-medium text-slate-900">{config.type} Analysis</h4>
-                <p className="text-xs text-slate-500">{config.xAxis} vs {config.yAxis}</p>
-              </div>
+              <button 
+                onClick={handleDownload}
+                className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition-all shadow-sm"
+              >
+                <Download className="w-4 h-4" />
+                Download Chart
+              </button>
             </div>
             {renderChart()}
           </div>
